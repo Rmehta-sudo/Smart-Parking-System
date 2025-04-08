@@ -197,7 +197,156 @@ void checkParkingSlots(unsigned long currentTime) {
     http_post.end();
 }
 
+void printSensorReadings() {
+    String output = "";
+    output += String(analogRead(ENTRY_IR_SENSOR)) + "\t";
+    output += String(analogRead(EXIT_IR_SENSOR)) + "\t";
+
+    for (int i = 0; i < NUM_SLOTS; i++) {
+        float d = slots[i].lastValidDistance;
+        if (!slots[i].isSensorFaulty) {
+            if (d < parking_threshold) output += "YES\t";
+            else output += String(d, 1) + "cm\t";
+        } else {
+            output += "ERR\t";
+        }
+    }
+    Serial.println(output);
+}
+
 void checkEntryGate() {
+    int entrySensorValue = analogRead(ENTRY_IR_SENSOR);
+
+    if (entrySensorValue < DETECTION_THRESHOLD) {
+        if (entryStartTime == 0) entryStartTime = millis();
+        if ((millis() - entryStartTime >= GATE_WAIT_TIME) && !entryGateOpen) {
+
+            int wheels = 4;
+            int slot = -1, passkey = -1, httpResponseCode;
+            String payload;
+
+            // Create the JSON payload
+            StaticJsonDocument<100> jsonDoc;
+            jsonDoc["wheels"] = wheels;
+            String requestBody;
+            serializeJson(jsonDoc, requestBody);
+
+            HTTPClient http;
+            if (wheels == 2) {
+                http.begin(get_entry_url_2);
+            } else {
+                http.begin(get_entry_url_4);
+            }
+            http.addHeader("Content-Type", "application/json");
+            httpResponseCode = http.POST(requestBody);
+            payload = http.getString();
+            http.end();
+
+            if (httpResponseCode == 200) {
+                StaticJsonDocument<200> doc;
+                DeserializationError error = deserializeJson(doc, payload);
+                if (!error) {
+                    slot = doc["slot"];
+                    passkey = doc["passkey"];
+                    Serial.println("Slot: " + String(slot));
+                    Serial.println("Passkey: " + String(passkey));
+                } else {
+                    Serial.print("JSON parse failed: ");
+                    Serial.println(error.c_str());
+                }
+            } else {
+                Serial.print("POST failed: ");
+                Serial.println(httpResponseCode);
+            }
+
+            Serial.print("Assigned Parking Slot: ");
+            Serial.println(slot);
+            digitalWrite(ENTRY_LED_PIN, HIGH);
+            entryGateServo.write(90);
+            entryGateOpen = true;
+            entryNoDetectionStartTime = 0;
+        }
+    } else {
+        entryStartTime = 0;
+        if (entryGateOpen) {
+            if (entryNoDetectionStartTime == 0) entryNoDetectionStartTime = millis();
+            if (millis() - entryNoDetectionStartTime >= GATE_CLOSE_WAIT) {
+                entryGateServo.write(0);
+                digitalWrite(ENTRY_LED_PIN, LOW);
+                entryGateOpen = false;
+                entryNoDetectionStartTime = 0;
+            }
+        }
+    }
+}
+
+void checkExitGate() {
+    int exitSensorValue = analogRead(EXIT_IR_SENSOR);
+
+    if (exitSensorValue < DETECTION_THRESHOLD) {
+        if (exitStartTime == 0) exitStartTime = millis();
+        if ((millis() - exitStartTime >= GATE_WAIT_TIME) && !exitGateOpen && !waitingForExitSlot) {
+            HTTPClient http;
+            http.begin(get_exit_pin_url);
+            http.addHeader("Content-Type", "application/json");
+
+            // Dummy body if needed (since POST usually has one)
+            String body = "{}";
+            int response = http.POST(body);
+
+            if (response > 0) {
+                String payload = http.getString();
+                Serial.print("Exit code pin : ");
+                Serial.println(payload);
+            } else {
+                Serial.print("POST failed with code: ");
+                Serial.println(response);
+            }
+
+            http.end();
+            waitingForExitSlot = true;
+        }
+    } else {
+        exitStartTime = 0;
+        if (exitGateOpen) {
+            if (exitNoDetectionStartTime == 0) exitNoDetectionStartTime = millis();
+            if (millis() - exitNoDetectionStartTime >= GATE_CLOSE_WAIT) {
+                exitGateServo.write(0);
+                digitalWrite(EXIT_LED_PIN, LOW);
+                exitGateOpen = false;
+                exitNoDetectionStartTime = 0;
+            }
+        }
+    }
+
+    if (waitingForExitSlot) {
+        HTTPClient http;
+        http.begin(get_exit_approved_url);
+        http.addHeader("Content-Type", "application/json");
+
+        String body = "{}";
+        int response = http.POST(body);
+        String approval = http.getString();
+        http.end();
+
+        if (approval.toInt() == 1) {
+            Serial.println("Confirmed. Opening exit gate...");
+            digitalWrite(EXIT_LED_PIN, HIGH);
+            exitGateServo.write(90);
+            exitGateOpen = true;
+            waitingForExitSlot = false;
+            exitNoDetectionStartTime = 0;
+        } else {
+            Serial.println("Approval not yet granted.");
+        }
+    }
+}
+
+
+
+
+
+void checkEntryGateGet() {
     int entrySensorValue = analogRead(ENTRY_IR_SENSOR);
 
     if (entrySensorValue < DETECTION_THRESHOLD) {
@@ -228,6 +377,7 @@ void checkEntryGate() {
                 StaticJsonDocument<200> doc;
                 DeserializationError error = deserializeJson(doc, payload);
                 if (!error) {
+
                     slot = doc["slot"];
                     passkey = doc["passkey"];
                     Serial.println("Slot: " + String(slot));
@@ -262,7 +412,7 @@ void checkEntryGate() {
     }
 }
 
-void checkExitGate() {
+void checkExitGateGet() {
     int exitSensorValue = analogRead(EXIT_IR_SENSOR);
 
     if (exitSensorValue < DETECTION_THRESHOLD) {
@@ -311,19 +461,3 @@ void checkExitGate() {
     }
 }
 
-void printSensorReadings() {
-    String output = "";
-    output += String(analogRead(ENTRY_IR_SENSOR)) + "\t";
-    output += String(analogRead(EXIT_IR_SENSOR)) + "\t";
-
-    for (int i = 0; i < NUM_SLOTS; i++) {
-        float d = slots[i].lastValidDistance;
-        if (!slots[i].isSensorFaulty) {
-            if (d < parking_threshold) output += "YES\t";
-            else output += String(d, 1) + "cm\t";
-        } else {
-            output += "ERR\t";
-        }
-    }
-    Serial.println(output);
-}
